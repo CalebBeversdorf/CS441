@@ -1,0 +1,12 @@
+# CS 441 Group Project
+## How to Use
+1. Make sure [uv](https://docs.astral.sh/uv/getting-started/installation/) is installed on your machine. Then, clone the repo, `cd` into the root, and run `uv sync`. This will install all the necessary python dependencies.
+2. While that's running, start downloading the training data from [here](). It's just less than 40 GB and contains nearly 100k images, so it will take a while. The dataset contains curated images from [yfcc15m](https://huggingface.co/datasets/mehdidc/yfcc15m), [pastvu](https://huggingface.co/datasets/nyuuzyou/pastvu), [osv5m](https://huggingface.co/datasets/osv5m/osv5m), and the [Wikimedia Commons](https://commons.wikimedia.org/wiki/Main_Page). Extract the data folder to the root of the project.
+3. Most of the code for this project is contained in the notebooks folder. I split the code into several different notebooks by function. The data was collected via the scripts in the 01 notebooks. I then found the optimal tiling for world locations in the 02 notebook. The relevant output from those notebooks are contained in the data folder, so you shouldn't need to run them unless you want to change the dataset for further training. The 03 notebooks contain the linear probing and fine-tuning code for 2 different models. **The rest of the notebooks are unfinished.**
+4. Play with the Timeguessr AI interactively with the 07 notebook!
+
+## Warnings
+Although I've tried to make this code cross platform, be aware that there might be issues with different GPU brands or operating systems. I made this on a windows machine with a Nvidia RTX 4070.
+
+## Attributions
+Gemini AI was used for large portions of the code for this project, however not without significant verification and guidance. 
