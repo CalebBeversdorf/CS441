@@ -29,6 +29,7 @@ from .models import (
 )
 from .train import (
     extract_and_cache_embeddings,
+    load_cached_embeddings,
     train_linear_probe,
     train_finetune,
     evaluate_model_on_dataset,
@@ -58,6 +59,7 @@ __all__ = [
     "GeodesicTileLoss",
     "decode_predictions",
     "extract_and_cache_embeddings",
+    "load_cached_embeddings",
     "train_linear_probe",
     "train_finetune",
     "evaluate_model_on_dataset",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -41,6 +42,102 @@ def _get_amp_dtype(device: torch.device) -> torch.dtype:
     return torch.float16
 
 
+def _split_paths_sha256(df: pd.DataFrame) -> str:
+    """Deterministic SHA-256 fingerprint of ordered normalized image_paths in a split."""
+    h = hashlib.sha256()
+    if "image_path" in df.columns:
+        for p in df["image_path"].astype(str):
+            h.update(p.replace("\\", "/").encode("utf-8"))
+            h.update(b"\n")
+    return h.hexdigest()
+
+
+def load_cached_embeddings(
+    model_id: str,
+    splits: dict[str, pd.DataFrame],
+    project_root: str | Path,
+) -> dict[str, np.ndarray]:
+    """Load precomputed ViT embeddings from disk and sanity-check them against `splits`.
+
+    Checks:
+      1. Every split `.npy` exists on disk.
+      2. Each array is 2D and `arr.shape[0] == len(splits[split_name])`.
+      3. Embedding dimension is identical across all splits.
+      4. No NaN/Inf values and non-zero norms.
+      5. If `<split>_manifest.json` is present, verifies exact `image_path` order hash (`paths_sha256`).
+    """
+    project_root = Path(project_root)
+    cache_dir = project_root / "data" / "embeddings" / _model_slug(model_id)
+    if not cache_dir.exists():
+        raise FileNotFoundError(
+            f"No cached embeddings directory at {cache_dir}. Set CFG['use_cached_embeddings'] = False to extract."
+        )
+
+    cached: dict[str, np.ndarray] = {}
+    embed_dim: int | None = None
+    manifest_verified: list[str] = []
+    manifest_missing: list[str] = []
+
+    for split_name, df in splits.items():
+        npy_path = cache_dir / f"{split_name}_embeddings.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(
+                f"Missing cached embeddings for split '{split_name}': {npy_path}. "
+                "Set CFG['use_cached_embeddings'] = False to extract."
+            )
+
+        arr = np.load(npy_path)
+        if arr.ndim != 2:
+            raise ValueError(f"Cached '{split_name}' embeddings must be 2D, got shape {arr.shape}.")
+        if arr.shape[0] != len(df):
+            raise ValueError(
+                f"Row count mismatch for split '{split_name}': cached embeddings have {arr.shape[0]:,} rows, "
+                f"but loaded dataset has {len(df):,} rows. Set CFG['use_cached_embeddings'] = False to re-extract."
+            )
+        if embed_dim is None:
+            embed_dim = int(arr.shape[1])
+        elif int(arr.shape[1]) != embed_dim:
+            raise ValueError(
+                f"Embedding dim mismatch for split '{split_name}': got {arr.shape[1]}, expected {embed_dim}."
+            )
+
+        if not np.isfinite(arr).all():
+            raise ValueError(f"Cached '{split_name}' embeddings contain NaN or Inf values.")
+
+        # Quick norm check on a sample (first, middle, last rows) to catch degenerate all-zero caches
+        if len(arr) > 0:
+            sample_idx = sorted({0, len(arr) // 2, len(arr) - 1})
+            sample_norms = np.linalg.norm(arr[sample_idx].astype(np.float32), axis=1)
+            if np.any(sample_norms < 1e-6):
+                raise ValueError(f"Cached '{split_name}' embeddings contain near-zero norm vectors.")
+
+        manifest_path = cache_dir / f"{split_name}_manifest.json"
+        if manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            expected_hash = _split_paths_sha256(df)
+            if manifest.get("paths_sha256") != expected_hash:
+                raise ValueError(
+                    f"Dataset fingerprint mismatch for split '{split_name}': cached image order/paths do not match "
+                    "the loaded dataset_with_tiles.csv. Set CFG['use_cached_embeddings'] = False to re-extract."
+                )
+            manifest_verified.append(split_name)
+        else:
+            manifest_missing.append(split_name)
+
+        cached[split_name] = arr
+
+    summary = ", ".join(f"{k}={v.shape}" for k, v in cached.items())
+    print(f"[CACHE OK] Loaded & verified cached embeddings for {model_id} from {cache_dir} ({summary})")
+    if manifest_verified:
+        print(f"  Exact image_path SHA-256 manifest verified for: {manifest_verified}")
+    if manifest_missing:
+        print(
+            f"  Note: No manifest.json found for {manifest_missing} (created before manifest tracking); "
+            "row count, dim, finite, and norm checks passed."
+        )
+    return cached
+
+
 @torch.no_grad()
 def extract_and_cache_embeddings(
     model_id: str,
@@ -58,11 +155,16 @@ def extract_and_cache_embeddings(
 
     cached: dict[str, np.ndarray] = {}
     missing_splits = []
-    for split_name in splits:
+    for split_name, df in splits.items():
         npy_path = cache_dir / f"{split_name}_embeddings.npy"
+        manifest_path = cache_dir / f"{split_name}_manifest.json"
         if npy_path.exists() and not force:
             arr = np.load(npy_path)
-            if len(arr) == len(splits[split_name]):
+            hash_ok = True
+            if manifest_path.exists():
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                hash_ok = manifest.get("paths_sha256") == _split_paths_sha256(df)
+            if arr.ndim == 2 and len(arr) == len(df) and hash_ok:
                 cached[split_name] = arr
                 continue
         missing_splits.append(split_name)
@@ -80,7 +182,8 @@ def extract_and_cache_embeddings(
     backbone.eval()
 
     for split_name in missing_splits:
-        ds = TimeguessrImageDataset(splits[split_name], project_root=project_root, transform=eval_tf)
+        df = splits[split_name]
+        ds = TimeguessrImageDataset(df, project_root=project_root, transform=eval_tf)
         loader = DataLoader(
             ds,
             batch_size=batch_size,
@@ -97,6 +200,21 @@ def extract_and_cache_embeddings(
         emb = np.concatenate(chunks, axis=0)
         npy_path = cache_dir / f"{split_name}_embeddings.npy"
         np.save(npy_path, emb)
+        manifest_path = cache_dir / f"{split_name}_manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "model_id": model_id,
+                    "split": split_name,
+                    "num_rows": int(emb.shape[0]),
+                    "embed_dim": int(emb.shape[1]),
+                    "dtype": str(emb.dtype),
+                    "paths_sha256": _split_paths_sha256(df),
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         cached[split_name] = emb
         print(f"Saved {split_name}: shape={emb.shape}, size={emb.nbytes / 1e6:.1f} MB -> {npy_path}")
 
