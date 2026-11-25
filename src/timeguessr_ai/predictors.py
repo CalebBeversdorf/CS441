@@ -197,12 +197,13 @@ def load_predictor(
     """Factory to instantiate a linear-probe or fine-tuned TimeGuessr AI predictor.
 
     Supported `model_type` presets:
-      - "streetclip_finetune"     : Fine-tuned StreetCLIP ViT (`outputs/models/streetclip_finetune/best_checkpoint.pt`)
-      - "streetclip_linear_probe" : Linear-probed StreetCLIP (`outputs/models/streetclip_linear_probe/best_checkpoint.pt`)
-      - "siglip2_linear_probe"    : Linear-probed SigLIP 2 (`outputs/models/siglip2_linear_probe/best_checkpoint.pt`)
-      - "siglip2_finetune"        : Fine-tuned SigLIP 2 (`outputs/models/siglip2_finetune/best_checkpoint.pt`)
-      - "linear_probe"            : Custom linear-probe checkpoint via `checkpoint_path=...`
-      - "finetuned"               : Custom fine-tuned checkpoint via `checkpoint_path=...`
+      - "streetclip_finetune"           : Fine-tuned StreetCLIP ViT (`outputs/models/streetclip_finetune/best_checkpoint.pt`)
+      - "streetclip_linear_probe"       : Linear-probed StreetCLIP (`outputs/models/streetclip_linear_probe/best_checkpoint.pt`)
+      - "streetclip_linear_probe_tuned" : Tuned linear-probed StreetCLIP (`outputs/models/streetclip_linear_probe_tuned/best_checkpoint.pt`)
+      - "siglip2_linear_probe"          : Linear-probed SigLIP 2 (`outputs/models/siglip2_linear_probe/best_checkpoint.pt`)
+      - "siglip2_finetune"              : Fine-tuned SigLIP 2 (`outputs/models/siglip2_finetune/best_checkpoint.pt`)
+      - "linear_probe"                  : Custom linear-probe checkpoint via `checkpoint_path=...`
+      - "finetuned"                     : Custom fine-tuned checkpoint via `checkpoint_path=...`
     """
     project_root = Path(project_root)
     models_dir = project_root / "outputs" / "models"
@@ -229,6 +230,15 @@ def load_predictor(
             device=device,
             **kwargs,
         )
+    if key == "streetclip_linear_probe_tuned":
+        pred = LinearProbePredictor(
+            checkpoint_path=kwargs.pop("checkpoint_path", models_dir / "streetclip_linear_probe_tuned" / "best_checkpoint.pt"),
+            project_root=project_root,
+            device=device,
+            **kwargs,
+        )
+        pred.name = f"Linear Probe Tuned ({pred.model_id})" if pred.name.startswith("Linear Probe") else pred.name
+        return pred
     if key == "siglip2_linear_probe":
         return LinearProbePredictor(
             checkpoint_path=kwargs.pop("checkpoint_path", models_dir / "siglip2_linear_probe" / "best_checkpoint.pt"),
@@ -243,6 +253,6 @@ def load_predictor(
 
     raise ValueError(
         f"Unknown model_type '{model_type}'. Choose from: "
-        "streetclip_finetune, streetclip_linear_probe, siglip2_linear_probe, "
-        "siglip2_finetune, linear_probe, finetuned."
+        "streetclip_finetune, streetclip_linear_probe, streetclip_linear_probe_tuned, "
+        "siglip2_linear_probe, siglip2_finetune, linear_probe, finetuned."
     )
