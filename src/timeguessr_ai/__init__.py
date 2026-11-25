@@ -35,6 +35,23 @@ from .train import (
     evaluate_model_on_dataset,
     save_run_outputs,
 )
+from .game import (
+    PlayerDistribution,
+    RoundPlayerStats,
+    TimeguessrGame,
+    TimeguessrRound,
+    fetch_player_distribution,
+    fetch_timeguessr_game,
+    parse_play_array_from_html,
+    score_round,
+)
+from .predictors import (
+    BaseTimeguessrPredictor,
+    FineTunedViTPredictor,
+    LinearProbePredictor,
+    PredictionResult,
+    load_predictor,
+)
 
 __all__ = [
     "EARTH_RADIUS_KM",
@@ -64,4 +81,17 @@ __all__ = [
     "train_finetune",
     "evaluate_model_on_dataset",
     "save_run_outputs",
+    "PlayerDistribution",
+    "RoundPlayerStats",
+    "TimeguessrGame",
+    "TimeguessrRound",
+    "fetch_player_distribution",
+    "fetch_timeguessr_game",
+    "parse_play_array_from_html",
+    "score_round",
+    "BaseTimeguessrPredictor",
+    "FineTunedViTPredictor",
+    "LinearProbePredictor",
+    "PredictionResult",
+    "load_predictor",
 ]
