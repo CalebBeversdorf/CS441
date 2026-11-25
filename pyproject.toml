@@ -8,9 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    # Deep Learning & Vision Transformers
-    "torch>=2.6.0",
-    "torchvision>=0.21.0",
+    # Deep Learning & Vision Transformers (torch/torchvision installed via extras: cu128, rocm, xpu, cpu)
     "transformers>=4.49.0",
     "timm>=1.0.0",
     "accelerate>=1.0.0",
@@ -59,13 +57,74 @@ dependencies = [
     "ipykernel>=6.29.0",
 ]
 
+[project.optional-dependencies]
+cpu = [
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+]
+cu128 = [
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+]
+rocm = [
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "pytorch-triton-rocm; sys_platform == 'linux'",
+]
+xpu = [
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "triton-xpu; sys_platform == 'linux' or sys_platform == 'win32'",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "cpu" },
+        { extra = "cu128" },
+        { extra = "rocm" },
+        { extra = "xpu" },
+    ],
+]
+
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchvision = { index = "pytorch-cu128" }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-xpu", extra = "xpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+torchvision = [
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-xpu", extra = "xpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+pytorch-triton-rocm = [
+    { index = "pytorch-rocm", extra = "rocm", marker = "sys_platform == 'linux'" },
+]
+triton-xpu = [
+    { index = "pytorch-xpu", extra = "xpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
 explicit = true
 
 [project.scripts]

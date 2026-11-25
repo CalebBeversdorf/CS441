@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -36,10 +37,79 @@ def _model_slug(model_id: str) -> str:
     return model_id.replace("/", "__").replace(" ", "_")
 
 
+def _is_xpu_available() -> bool:
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
+def _is_mps_available() -> bool:
+    return getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available()
+
+
+def get_default_device() -> torch.device:
+    """Return the best available accelerator (`cuda` -> `xpu` -> `mps` -> `cpu`)."""
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if _is_xpu_available():
+        return torch.device("xpu")
+    if _is_mps_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def resolve_device(device: str | torch.device | None = None) -> torch.device:
+    """Resolve a requested device string/object safely, falling back if unavailable."""
+    if device is None or str(device).lower() == "auto":
+        return get_default_device()
+    dev = torch.device(device)
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        return get_default_device()
+    if dev.type == "xpu" and not _is_xpu_available():
+        return get_default_device()
+    if dev.type == "mps" and not _is_mps_available():
+        return torch.device("cpu")
+    return dev
+
+
+def clear_device_cache(device: str | torch.device | None = None) -> None:
+    """Release cached allocator memory on CUDA, Intel XPU, or Apple Silicon MPS (no-op on CPU)."""
+    dev = resolve_device(device)
+    if dev.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    elif dev.type == "xpu" and _is_xpu_available() and hasattr(torch.xpu, "empty_cache"):
+        torch.xpu.empty_cache()
+    elif dev.type == "mps" and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        torch.mps.empty_cache()
+
+
+def format_device_info(device: str | torch.device | None = None) -> str:
+    """Human-readable label for the active compute device."""
+    dev = resolve_device(device)
+    if dev.type == "cuda" and torch.cuda.is_available():
+        return f"{dev} ({torch.cuda.get_device_name(0)})"
+    if dev.type == "xpu" and _is_xpu_available():
+        name = torch.xpu.get_device_name(0) if hasattr(torch.xpu, "get_device_name") else "Intel XPU"
+        return f"{dev} ({name})"
+    if dev.type == "mps":
+        return "mps (Apple Silicon)"
+    return str(dev)
+
+
 def _get_amp_dtype(device: torch.device) -> torch.dtype:
     if device.type == "cuda" and torch.cuda.is_bf16_supported():
         return torch.bfloat16
-    return torch.float16
+    if device.type == "cuda":
+        return torch.float16
+    if device.type == "xpu" and hasattr(torch.xpu, "is_bf16_supported") and torch.xpu.is_bf16_supported():
+        return torch.bfloat16
+    return torch.float32
+
+
+def _amp_context(device: torch.device, amp_dtype: torch.dtype):
+    if device.type == "cuda":
+        return torch.amp.autocast(device_type="cuda", dtype=amp_dtype)
+    if device.type == "xpu" and amp_dtype == torch.bfloat16:
+        return torch.amp.autocast(device_type="xpu", dtype=amp_dtype)
+    return contextlib.nullcontext()
 
 
 def _split_paths_sha256(df: pd.DataFrame) -> str:
@@ -145,7 +215,7 @@ def extract_and_cache_embeddings(
     project_root: str | Path,
     batch_size: int = 64,
     num_workers: int = 0,
-    device: str | torch.device = "cuda",
+    device: str | torch.device | None = None,
     force: bool = False,
 ) -> dict[str, np.ndarray]:
     """Extract frozen ViT vision embeddings once and cache to data/embeddings/<slug>/."""
@@ -173,7 +243,7 @@ def extract_and_cache_embeddings(
         print(f"Loaded cached embeddings for {model_id} from {cache_dir}")
         return cached
 
-    device = torch.device(device)
+    device = resolve_device(device)
     amp_dtype = _get_amp_dtype(device)
     _, eval_tf = build_transforms_from_processor(model_id)
 
@@ -193,8 +263,8 @@ def extract_and_cache_embeddings(
         )
         chunks = []
         for batch in tqdm(loader, desc=f"Extract {split_name}", leave=True):
-            px = batch["pixel_values"].to(device, non_blocking=True)
-            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+            px = batch["pixel_values"].to(device, non_blocking=(device.type == "cuda"))
+            with _amp_context(device, amp_dtype):
                 feats = backbone(px)
             chunks.append(feats.float().cpu().numpy().astype(np.float16))
         emb = np.concatenate(chunks, axis=0)
@@ -219,8 +289,7 @@ def extract_and_cache_embeddings(
         print(f"Saved {split_name}: shape={emb.shape}, size={emb.nbytes / 1e6:.1f} MB -> {npy_path}")
 
     del backbone
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
+    clear_device_cache(device)
     return cached
 
 
@@ -230,11 +299,11 @@ def evaluate_model_on_dataset(
     loader: DataLoader,
     df: pd.DataFrame,
     cells_df: pd.DataFrame,
-    device: str | torch.device = "cuda",
+    device: str | torch.device | None = None,
     is_embedding_loader: bool = False,
 ) -> tuple[dict[str, float], pd.DataFrame, np.ndarray, np.ndarray]:
     """Run inference over a DataLoader and compute exact Timeguessr metrics + raw logits."""
-    device = torch.device(device)
+    device = resolve_device(device)
     amp_dtype = _get_amp_dtype(device)
     model.eval()
 
@@ -243,8 +312,8 @@ def evaluate_model_on_dataset(
 
     for batch in loader:
         inp_key = "embedding" if is_embedding_loader else "pixel_values"
-        x = batch[inp_key].to(device, non_blocking=True)
-        with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+        x = batch[inp_key].to(device, non_blocking=(device.type == "cuda"))
+        with _amp_context(device, amp_dtype):
             t_out, s_out = model(x)
         time_logits_list.append(t_out.float().cpu().numpy())
         space_logits_list.append(s_out.float().cpu().numpy())
@@ -325,13 +394,13 @@ def train_linear_probe(
     w_time: float = 1.0,
     dropout: float = 0.2,
     country_alpha: float = 0.7,
-    device: str | torch.device = "cuda",
+    device: str | torch.device | None = None,
     seed: int = 42,
 ) -> dict[str, Any]:
     """Stage 1: Train DualHeadClassifier on frozen precomputed ViT embeddings."""
     torch.manual_seed(seed)
     np.random.seed(seed)
-    device = torch.device(device)
+    device = resolve_device(device)
     amp_dtype = _get_amp_dtype(device)
 
     train_df = splits["train"]
@@ -379,13 +448,14 @@ def train_linear_probe(
         n_batches = 0
 
         for batch in train_loader:
-            emb = batch["embedding"].to(device, non_blocking=True)
-            year_idx = batch["year_idx"].to(device, non_blocking=True)
-            lats = batch["lat"].to(device, non_blocking=True)
-            lons = batch["lon"].to(device, non_blocking=True)
+            non_blocking = device.type == "cuda"
+            emb = batch["embedding"].to(device, non_blocking=non_blocking)
+            year_idx = batch["year_idx"].to(device, non_blocking=non_blocking)
+            lats = batch["lat"].to(device, non_blocking=non_blocking)
+            lons = batch["lon"].to(device, non_blocking=non_blocking)
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+            with _amp_context(device, amp_dtype):
                 t_logits, s_logits = model(emb)
                 loss_t = time_criterion(t_logits, year_idx)
                 loss_s = space_criterion(s_logits, lats, lons)
@@ -496,19 +566,20 @@ def train_finetune(
     dropout: float = 0.2,
     country_alpha: float = 0.7,
     num_workers: int = 0,
-    device: str | torch.device = "cuda",
+    device: str | torch.device | None = None,
     seed: int = 42,
     resume: bool = True,
 ) -> dict[str, Any]:
-    """Stage 2: Fine-tune last N ViT blocks + warm-started dual MLP heads in bfloat16.
+    """Stage 2: Fine-tune last N ViT blocks + warm-started dual MLP heads.
 
+    Uses bfloat16/float16 autocast on CUDA and float32 on Apple Silicon MPS / CPU.
     Saves `last_checkpoint.pt` and `best_checkpoint.pt` atomically after every epoch.
     If `resume=True` and `output_dir/last_checkpoint.pt` exists, resumes automatically
     from the next epoch with full model, optimizer, scheduler, and history state.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
-    device = torch.device(device)
+    device = resolve_device(device)
     amp_dtype = _get_amp_dtype(device)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -605,7 +676,7 @@ def train_finetune(
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, _lr_lambda)
     use_scaler = device.type == "cuda" and amp_dtype == torch.float16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler)
+    scaler = torch.amp.GradScaler("cuda", enabled=True) if use_scaler else None
 
     best_val_score = -1.0
     best_state = None
@@ -651,12 +722,13 @@ def train_finetune(
 
         pbar = tqdm(train_loader, desc=f"Finetune Ep {epoch}/{epochs}", leave=True)
         for step_idx, batch in enumerate(pbar, start=1):
-            px = batch["pixel_values"].to(device, non_blocking=True)
-            year_idx = batch["year_idx"].to(device, non_blocking=True)
-            lats = batch["lat"].to(device, non_blocking=True)
-            lons = batch["lon"].to(device, non_blocking=True)
+            non_blocking = device.type == "cuda"
+            px = batch["pixel_values"].to(device, non_blocking=non_blocking)
+            year_idx = batch["year_idx"].to(device, non_blocking=non_blocking)
+            lats = batch["lat"].to(device, non_blocking=non_blocking)
+            lons = batch["lon"].to(device, non_blocking=non_blocking)
 
-            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=(device.type == "cuda")):
+            with _amp_context(device, amp_dtype):
                 t_logits, s_logits = model(px)
                 loss_t = time_criterion(t_logits, year_idx)
                 loss_s = space_criterion(s_logits, lats, lons)

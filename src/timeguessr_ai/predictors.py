@@ -14,6 +14,7 @@ from PIL import Image
 from .data import build_transforms_from_processor, load_dataset_and_tiles
 from .metrics import YEAR_MAX, YEAR_MIN
 from .models import DualHeadClassifier, DualHeadViT, VisionBackbone, decode_predictions
+from .train import resolve_device
 
 
 @dataclass
@@ -63,13 +64,13 @@ class LinearProbePredictor(BaseTimeguessrPredictor):
         self,
         checkpoint_path: str | Path,
         project_root: str | Path,
-        device: str | torch.device = "cuda",
+        device: str | torch.device | None = None,
         use_topk_centroid: bool = True,
         topk_space: int = 5,
     ):
         self.checkpoint_path = Path(checkpoint_path)
         self.project_root = Path(project_root)
-        self.device = torch.device(device if (str(device) != "cuda" or torch.cuda.is_available()) else "cpu")
+        self.device = resolve_device(device)
         self.use_topk_centroid = use_topk_centroid
         self.topk_space = topk_space
 
@@ -129,13 +130,13 @@ class FineTunedViTPredictor(BaseTimeguessrPredictor):
         self,
         checkpoint_path: str | Path,
         project_root: str | Path,
-        device: str | torch.device = "cuda",
+        device: str | torch.device | None = None,
         use_topk_centroid: bool = True,
         topk_space: int = 5,
     ):
         self.checkpoint_path = Path(checkpoint_path)
         self.project_root = Path(project_root)
-        self.device = torch.device(device if (str(device) != "cuda" or torch.cuda.is_available()) else "cpu")
+        self.device = resolve_device(device)
         self.use_topk_centroid = use_topk_centroid
         self.topk_space = topk_space
 
@@ -190,7 +191,7 @@ class FineTunedViTPredictor(BaseTimeguessrPredictor):
 def load_predictor(
     model_type: str,
     project_root: str | Path,
-    device: str | torch.device = "cuda",
+    device: str | torch.device | None = None,
     **kwargs: Any,
 ) -> BaseTimeguessrPredictor:
     """Factory to instantiate a linear-probe or fine-tuned TimeGuessr AI predictor.
